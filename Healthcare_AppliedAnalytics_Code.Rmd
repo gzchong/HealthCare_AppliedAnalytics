@@ -1,0 +1,819 @@
+---
+title: "Healthcare Project"
+output: html_document
+date: "2023-10-27"
+---
+```{r libraries}
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(lmtest)
+library(MASS) #For negative binomial
+library(tableone)
+library(Matching)
+library(caret)
+library(boot)
+library(Metrics)
+library(pscl)
+
+
+#install.packages("caret")
+#install.packages("Metrics")
+#install.packages("devtools")
+#library(devtools)
+#devtools::install_github('cran/ggplot2')
+#install.packages("tableone")
+#install.packages("Matching")
+
+
+```
+
+
+# Load Data and Variables
+```{r }
+data = read.csv("C:/Users/huawe/Desktop/Healthcare/Project/lun_smk_naga.csv", stringsAsFactors = TRUE)
+data <- data[,-c(1,2)]
+
+str(data)
+colnames(data)
+
+# "X"         "city"      "sex"       "un4gy"     "distcat"   "agxcat"    "agecat"    "time"      "dcat"      "scat"      "smkcat"    "smkyrcat"  "smkqyrcat" "upyr"      "subjects"  "gdist"     "agex"     
+# "age"       "year"      "lung"      "larynx"    "othresp"   "d10lun"    "smkamt"    "smkyrs"    "smkqyrs"   "pyr"       "pyr92"     "nic"
+
+
+city <- data$city
+sex <- data$sex
+un4gy <- data$un4gy
+distcat <- data$distcat
+agxcat <- data$agxcat
+agecat <- data$agecat
+time <- data$time
+dcat <- data$dcat
+scat <- data$scat
+smkcat <- data$smkcat
+smkyrcat <- data$smkyrcat
+smkqyrcat <- data$smkqyrcat
+upyr <- data$upyr
+subjects <- data$subjects
+gdist <- data$gdist
+agex <- data$agex
+age <- data$age
+year <- data$year
+lung <- data$lung
+larynx <- data$larynx
+othresp <- data$othresp
+d10lun <- data$d10lun
+smkamt <- data$smkamt
+smkyrs <- data$smkyrs
+smkqyrs <- data$smkqyrs
+pyr <- data$pyr
+pyr92 <- data$pyr92
+nic <- data$nic
+
+
+#Data cleaning
+`%!in%` = Negate(`%in%`)
+trim_data <- data[data$scat %!in% c("1"), ]
+str(trim_data)
+
+trim_data[1:11]=lapply(trim_data[1:11],factor)
+
+sum(trim_data$lung)
+max(trim_data$lung)
+sum(trim_data$larynx)
+max(trim_data$larynx)
+sum(trim_data$othresp)
+max(trim_data$othresp)
+
+## Seperate data by gender
+
+male_data <- subset(trim_data, sex == "1")
+female_data <- subset(trim_data, sex == "2")
+
+```
+
+
+# Data Visualization 
+```{r , step 1 }
+
+## Visualize data by gender
+
+## Male
+ggplot(male_data, aes(x=upyr)) + geom_histogram(bins = 100)
+ggplot(male_data, aes(x=lung)) + geom_histogram(bins = 100)  ## not many observation is 1 and above
+ggplot(male_data, aes(x=d10lun)) + geom_histogram(bins = 100) ## overdispersion
+ggplot(male_data, aes(x=smkyrs)) + geom_histogram(bins = 100) ## overdispersion
+ggplot(male_data, aes(x=age)) + geom_histogram(bins = 100)   ## Follows normal distribution 
+
+test1 <- fitdistr(male_data$age, "normal")
+class(test1)
+para <- test1$estimate
+hist(male_data$age, prob= TRUE) + curve(dnorm(x, para[1], para[2]), col = 2, add = TRUE)
+
+hist(male_data$smkyrs)
+hist(female_data$smkyrs)
+
+ks.test(male_data$smkyrs, )
+
+hist(log(male_data$smkyrs))
+hist(log(female_data$smkyrs))
+ks.test(male_data$smkyrs,"pnorm", mean=mean(male_data$smkyrs), sd=sd(male_data$smkyrs))
+
+
+## Female
+
+ggplot(female_data, aes(x=upyr)) + geom_histogram(bins = 100)
+
+ggplot(female_data, aes(x=lung)) + geom_histogram(bins = 100)  ## not many observation is 1 and above
+
+ggplot(female_data, aes(x=d10lun)) + geom_histogram(bins = 100) ## overdispersion
+
+ggplot(female_data, aes(x=age)) + geom_histogram(bins = 100)   ## Follows normal distribution 
+
+test2 <- fitdistr(female_data$age, "normal")
+class(test2)
+para <- test2$estimate
+hist(female_data$age, prob= TRUE) + curve(dnorm(x, para[1], para[2]), col = 2, add = TRUE)
+
+#########################
+#Determining which variables to include (with lung as outcome, outcome is not continuous, we use box plot)
+#1. Sex (prop test) -> only variable with two categorical groups
+
+#chisq test
+cont_table<-table(trim_data$sex,trim_data$lung)
+chi_squared_test<-chisq.test(cont_table)
+chi_squared_test #p-value = 0.5064, not significant, male and female lung occurence may have a difference
+
+#we also ran a wilcox test, which is a non-parametric procedure especially there is many zeros
+wilcox.test(trim_data$lung~trim_data$sex,paired=F)
+#we do not reject null=no difference between genders in lung occurrence 
+
+#Proportion of lung occurences between female and male
+sum(trim_data$lung) #total number of lung cancer observation
+sum(trim_data$lung[trim_data$sex==1]) #male-> 291 occurences
+sum(trim_data$lung[trim_data$sex==2]) #female-> 171 occurences
+sum(trim_data$sex==1)
+sum(trim_data$sex==2)
+
+#prop lung occurences of m vs f is not significant
+prop.test(c(291,171),c(31008,21686),alternative="two.sided",
+         conf.level=0.95, correct=FALSE) 
+
+
+#we want to explore more gender differences (start from smkamt/smkyrs)
+#Check if smkamt/smkyrs is close to normal distribution
+hist(trim_data$smkyrs)
+hist(trim_data$smkamt)
+library(fitdistrplus)
+fit1<-fitdist(trim_data$smkamt,distr = "norm")
+summary(fit1)
+result1 <- gofstat(fit1, discrete=FALSE)
+result1
+# critical value is 1.36/sqrt(n) for alpha=0.05
+KScritvalue <-1.36/sqrt(length(trim_data$smkamt)) #standardize to data value
+KScritvalue
+
+ks.test(trim_data$smkamt,"pnorm", mean=mean(trim_data$smkamt), sd=sd(trim_data$smkamt))
+
+#KS stats is more than critical value at 0.95, we can reject null hypothesis of smkamt that it follows a norm dist
+# (CORRECTION: We can perform t.test because although the distribution does not follow normal, its means follows normal dist)
+
+fit2<-fitdist(trim_data$smkyrs,distr = "norm")
+summary(fit2)
+result2 <- gofstat(fit2, discrete=FALSE)
+result2
+# critical value is 1.36/sqrt(n) for alpha=0.05
+KScritvalue <-1.36/sqrt(length(trim_data$smkyrs)) #standardize to data value
+KScritvalue
+
+ks.test(trim_data$smkyrs,"pnorm", mean=mean(trim_data$smkyrs), sd=sd(trim_data$smkyrs))
+#KS stats is more than critical value at 0.95=0.00592459, we can reject null hypothesis of smkamt follows a norm dist
+#(CORRECTION: We can perform t.test because although the distribution does not follow normal, its means follows normal dist)
+
+
+#exploring rs between sex and smkamt
+boxplot(trim_data$smkamt~trim_data$sex,col=c("blue","red"),xlab="sex",ylab="No. of cigarettes")
+#t.test(trim_data$smkamt[trim_data$sex==1],trim_data$smkamt[trim_data$sex==2])
+#male has visibly higher mean of cigarettes smoked a day (probable confounder)
+
+#exploring rs between sex and smkyrs
+boxplot(trim_data$smkyrs~trim_data$sex,col=c("blue","red"),xlab="sex",ylab="No. of Smoking Years")
+#t.test(trim_data$smkyrs[trim_data$sex==1],trim_data$smkyrs[trim_data$sex==2])
+#looks like male has higher mean of smoking years
+
+#2. smkyrs and smkamt (include), smkqyrs (include)
+boxplot(trim_data$smkyrs~trim_data$lung,col=c("blue","red"),xlab="lung",ylab="No. of smoking years")
+boxplot(trim_data$smkamt~trim_data$lung,col=c("blue","red"),xlab="lung",ylab="No. of cigarettes")
+#should we just focus on smkyrs?
+boxplot(trim_data$smkqyrs[trim_data$smkcat!=2]~trim_data$lung[trim_data$smkcat!=2],col=c("blue","red"),xlab="lung",ylab="No. of quitted years")
+boxplot(trim_data$smkamt[trim_data$smkamt!=0]~trim_data$lung[trim_data$smkamt!=0],col=c("blue","red"),xlab="lung",ylab="No. of cigarettes smoked among smokers")
+
+#3. gdist (don't include)
+boxplot(trim_data$gdist~trim_data$lung,col=c("blue","red"),xlab="lung",ylab="Distance from hypocenter")
+
+#4. agex (don't include)
+boxplot(trim_data$agex~trim_data$lung,col=c("blue","red"),xlab="lung",ylab="Age of exposure")
+
+#5. age (include)
+boxplot(trim_data$age~trim_data$lung,col=c("blue","red"),xlab="lung",ylab="Attained age")
+
+#6. pyr and pyr92(could include)
+boxplot(trim_data$pyr92~trim_data$lung,col=c("blue","red"),xlab="lung",ylab="pyr")
+
+#7. upyr
+boxplot(trim_data$upyr~trim_data$lung,col=c("blue","red"),xlab="lung",ylab="years at risk")
+#we notice that the higher the years at risk, the more possibility of lung cancer is observed
+#which makes sense because the higher the period, the more potential to expose to cancer
+#that's why we need to standardize when running poisson regression
+
+#8. d10lun (don't include)
+boxplot(trim_data$d10lun~trim_data$lung,col=c("blue","red"),xlab="lung",ylab="lung dose")
+
+#9. un4gy (0 or 1) (include)
+sum(trim_data$lung) #total number of lung cancer observation
+sum(trim_data$lung[trim_data$un4gy==0]) #un4gy=0-> 1 occurence
+sum(trim_data$lung[trim_data$un4gy==1]) #un4gy=1-> 461 occurences
+sum(trim_data$un4gy==0)
+sum(trim_data$un4gy==1)
+
+#prop lung occurences of 0 vs 1 is significant
+prop.test(c(461,1),c(52181,513)) 
+
+#10. nic
+sum(trim_data$lung[trim_data$nic==0]) #nic=0-> 389 occurences
+sum(trim_data$lung[trim_data$nic==1]) #nic=1-> 73 occurences
+sum(trim_data$nic==0)
+sum(trim_data$nic==1)
+
+
+#Summarizing Data (justify why we use special cases of poisson reg)
+#1: Explore number of zeros in dataset
+ggplot(data=trim_data,aes(x=lung))+
+  geom_histogram()
+length(trim_data$lung[trim_data$lung==0]) #almost necessary for us to run hurdle regression
+
+#2: Explore number of upyr
+summary(trim_data$upyr) #high number is not the issue but those with small number, we have to get rid
+ggplot(data=trim_data,aes(x=lung,y=upyr))+
+  geom_point()
+
+min(trim_data$upyr[trim_data$lung==1]) #minimum upyr with lung==1
+
+
+
+```
+
+
+# Causation vs Correlation
+```{r pressure, echo=FALSE}
+
+## Causation for dist on radiation dose
+
+newdata=trim_data[trim_data$d10lun>0,]
+str(newdata)
+
+# Choose a pseudo-value
+pseudo_value <- 1  # You can adjust this value as needed
+
+# Apply the log transformation with the pseudo-value
+newdata$gdist <- log(newdata$gdist)
+newdata$smkamt <- log(newdata$smkamt + pseudo_value)
+newdata$smkyrs <- log(newdata$smkyrs + pseudo_value)
+newdata$smkqyrs <- log(newdata$smkqyrs + pseudo_value)
+
+newdata$dcat1 <- ifelse(newdata$d10lun > 1000,1,0)
+
+## 1000 mgy is considered harmful , the atomic trim_data has a significant effect on the person radiation once it is over 1000mgy 
+newdata= subset(newdata, select= - c(dcat,un4gy,subjects,agex,age,year,lung,larynx,othresp,pyr,pyr92,d10lun))
+
+
+newdata[,c( "nic")] = lapply(newdata[,c( "nic")],factor) # convert to factors
+
+# Table with original variables
+
+vars=names(newdata)
+vars=vars[vars!="dcat1"]
+tableOne = CreateTableOne(vars = vars, strata = "dcat1", data = newdata,test=F)
+t1=print(tableOne, smd=T)
+
+
+# Table with original variables after performing matching
+
+newdata.split=newdata[,vars]
+newdata.split=sapply(newdata.split,as.numeric)
+match=Match(Tr=newdata$dcat1, X=newdata.split, replace=T,ties=F)
+match = newdata[unlist(match[c("index.treated","index.control")]),]
+tableOne <- CreateTableOne(vars = vars, strata = "dcat1", data = match,test=F)
+t2=print(tableOne, smd=T)
+
+hist(newdata$smkamt)
+hist(newdata$smkyrs)
+hist(newdata$smkqyrs)
+
+qqnorm(newdata$smkamt)
+qqline(newdata$smkamt)
+
+qqnorm(newdata$smkyrs)
+qqline(newdata$smkyrs)
+
+ks.test(newdata$smkamt,"pnorm", mean=mean(newdata$smkamt), sd=sd(newdata$smkamt))
+ks.test(newdata$smkamt,"pnorm", mean=mean(newdata$smkamt), sd=sd(newdata$smkamt))
+ks.test(newdata$smkamt,"pnorm", mean=mean(newdata$smkamt), sd=sd(newdata$smkamt))
+
+gdist.y.1=match$gdist[match$dcat1==1]
+gdist.y.0=match$gdist[match$dcat1==0]
+t.test(gdist.y.1-gdist.y.0) ## statistically significant 
+
+smkamt.y.1=match$smkamt[match$dcat1==1]
+smkamt.y.0=match$smkamt[match$dcat1==0]
+t.test(smkamt.y.1-smkamt.y.0)
+
+smkyrs.y.1=match$smkyrs[match$dcat1==1]
+smkyrs.y.0=match$smkyrs[match$dcat1==0]
+t.test(smkyrs.y.1-smkyrs.y.0)
+
+```
+
+
+
+# New Regression for count data
+```{r pressure, echo=FALSE}
+
+# offset(upyr) 
+## scat, smkcat, smkyrcat did not remove unknown 
+
+## Normal Poisson Regression
+set.seed(123)
+
+#exploring dist and lung dose
+out = glm(lung ~ age + distcat +  offset(log(upyr)), data = trim_data, family = "poisson") ## distcat not significant
+summary(out) # AIC 4400.9
+
+out1 = glm(lung ~ age + gdist*distcat +  offset(log(upyr)), data = trim_data, family = "poisson") ## gdist not significant
+summary(out1) # AIC 4397.2
+
+out2 = glm(lung ~ age + distcat + d10lun +  offset(log(upyr)), data = trim_data, family = "poisson") ## dcat not significant
+summary(out2)# AIC 4398.6
+
+out3 = glm(lung ~ age  + d10lun + smkyrs +  offset(log(upyr)), data = trim_data, family = "poisson")
+## significant
+summary(out3)# AIC 4082.3 (smkyrs decrease AIC by a lot)
+BIC(out3)
+
+out4 = glm(lung ~ age + distcat + d10lun + smkyrs + smkcat +  offset(log(upyr)), data = trim_data, family = "poisson")  ## d10lun not significant
+summary(out4) # AIC 4073
+
+
+out5 = glm(lung ~ age + distcat + d10lun + smkyrs + smkamt + offset(log(upyr)), data = trim_data, family = "poisson") ## smkamt increases AIC
+summary(out5) # AIC 4078.9
+
+out6= glm(lung ~ age + smkyrs + d10lun + smkcat + offset(log(upyr)), data = trim_data, family = "poisson")
+summary(out6) # AIC 4074.2
+
+out7 = glm(lung ~ age + smkyrs + d10lun + smkcat + nic + smkqyrs +  offset(log(upyr)), data = trim_data, family = "poisson")
+summary(out7) #4074 (not much impact after adding nic and smkqyrs)
+
+out8 = glm(lung ~ age + smkyrs + d10lun + smkcat + un4gy +  offset(log(upyr)), data = trim_data, family = "poisson")
+summary(out8) # AIC 4075.2 (un4gy does not affect AIC)
+
+out9 = glm(lung ~ age + smkyrcat + d10lun + smkcat + offset(log(upyr)), data = trim_data, family = "poisson")
+summary(out9) # AIC 4111.2 (use smkyrs instead of smkyrcat)
+
+out10 = glm(lung ~ age + smkyrs + d10lun + smkcat + sex + offset(log(upyr)), data = trim_data, family = "poisson")
+summary(out10) # AIC 4073.9
+
+#exploring polynomial terms
+out11 = glm(lung ~ age + d10lun + smkcat + sex + poly(smkyrs,2,raw = TRUE) + offset(log(upyr)), data = trim_data, family = "poisson")
+summary(out11) # AIC 4075
+
+out12 = glm(lung ~ age + d10lun + smkcat + sex + poly(smkyrs,3,raw = TRUE) + offset(log(upyr)), data = trim_data, family = "poisson")  ## 2nd best
+summary(out12) # AIC 4061.8 (best polynomial term for smkyrs)
+
+out13 = glm(lung ~ age + d10lun + smkcat + sex + poly(smkyrs,4,raw = TRUE) + offset(log(upyr)), data = trim_data, family = "poisson")
+summary(out13) # AIC 4063.2
+
+#exploring interaction term
+out14 = glm(lung ~ age + smkcat + sex + d10lun*gdist + poly(smkyrs,3,raw = TRUE)  + offset(log(upyr)), data = trim_data, family = "poisson")
+summary(out14) # AIC 4060.4
+
+out15 = glm(lung ~ age + smkcat + poly(smkyrs,3,raw = TRUE)  + offset(log(upyr)), data = trim_data, family = "poisson") 
+summary(out15) # AIC 4064
+
+options(scipen=999)
+
+out16 = glm(lung ~ age + smkcat + sex +  gdist + poly(smkyrs,3,raw = TRUE) + offset(log(upyr)), data = trim_data, family = "poisson") ## AIC, 4059.9
+summary(out16)
+
+out17 = glm(lung ~ age + smkcat +  gdist + d10lun + smkyrs*sex + log(upyr), data = trim_data, family = "poisson") ## AIC, 4051.198
+summary(out17)
+AIC(out17)
+
+out18 = glm(lung ~ age + smkcat + sex + smkyrs*sex + log(upyr), data = trim_data, family = "poisson")
+summary(out18) ##AIC, 4048.5
+
+which.min(c(AIC(out1),AIC(out2),AIC(out3),AIC(out4),AIC(out5),AIC(out6),AIC(out7),AIC(out8),AIC(out9),AIC(out10),AIC(out11),AIC(out12),AIC(out13),AIC(out14),AIC(out15),AIC(out16),AIC(out17),AIC(out18)))
+
+## out18 has the lowest AIC
+
+
+mu = predict(out18, type = "response") #exp y to find y
+p0 = dpois(x = 0, lambda = mu)
+p1 = dpois(x=1, lambda =mu)
+p2 = dpois(x=2, lambda =mu)
+p3 = dpois(x=3, lambda =mu)
+p4 = dpois(x=4, lambda =mu)
+# predicted number of 0s , look in ratio of observed
+round(sum(p0)) #52252
+round(sum(p1)) #424
+round(sum(p2)) #17
+round(sum(p3)) # 1
+round(sum(p4)) # 0
+
+## Comparison between observed and predicted 
+sum(trim_data$lung == 0) # 52262
+sum(trim_data$lung == 1) # 407
+sum(trim_data$lung == 2) # 21
+sum(trim_data$lung == 3) # 3
+sum(trim_data$lung == 4) # 1
+
+
+
+#Assessing results of out (Poisson Regression)
+est_smkyrs=exp(0.047619)
+LCI_smkyrs=exp(0.047619-1.96*0.005235)
+UCI_smkyrs=exp(0.047619+1.96*0.005235)
+print(c(est_smkyrs,LCI_smkyrs,UCI_smkyrs))
+
+est_age=exp(0.053577)
+LCI_age=exp(0.053577-1.96*0.005051)
+UCI_age=exp(0.053577+1.96*0.005051)
+print(c(est_age,LCI_age,UCI_age))
+
+est=exp(-0.018144)
+est
+10^0.8
+LCI=exp(-0.018144-1.96*0.006717)
+UCI=exp(-0.018144+1.96*0.006717)
+print(c(est,LCI,UCI))
+
+
+
+set.seed(123)
+  # For evaluation metrics
+
+# Set the number of folds for cross-validation
+num_folds <- 5
+
+# Create a 5-fold cross-validation object
+cv <- createFolds(trim_data$lung, k = num_folds, list = TRUE, returnTrain = FALSE)
+
+# Initialize a vector to store evaluation metric results
+cv_results <- numeric(length(cv))
+
+# Perform cross-validation
+for (fold in 1:num_folds) {
+  # Split the data into training and testing sets
+  test_indices <- cv[[fold]]
+  train_data <- trim_data[-test_indices, ]
+  test_data <- trim_data[test_indices, ]
+  
+  # Fit the Poisson regression model
+  poisson_model <- glm(lung ~ age + smkcat + smkyrs*sex + log(upyr),
+                       data=train_data,family="poisson")
+  
+  # Make predictions on the test set
+  predicted_counts <- predict(poisson_model, newdata = test_data, type = "response")
+  
+  # Evaluate the model using an appropriate metric (e.g., RMSE, MAE, AIC)
+  # You can replace "RMSE" with the metric of your choice
+  cv_results[fold] <- mse(predicted_counts, test_data$lung)
+}
+cv_results
+# Calculate the mean and standard deviation of the evaluation metric
+mean_metric <- mean(cv_results)
+std_dev_metric <- sd(cv_results)
+mean_metric
+
+
+
+
+## Negative Binomial Regression
+
+set.seed(123)
+library(MASS)
+nb.out1 = glm.nb(lung ~ age + smkcat + sex + smkyrs*sex + offset(log(upyr)), data = trim_data)
+
+summary(nb.out1) # AIC 11649
+AIC(nb.out1)
+## Compare between Poisson and Negative Binomial 
+
+
+set.seed(123)
+  # For evaluation metrics
+
+# Set the number of folds for cross-validation
+num_folds <- 5
+
+# Create a 5-fold cross-validation object
+cv <- createFolds(trim_data$lung, k = num_folds, list = TRUE, returnTrain = FALSE)
+
+# Initialize a vector to store evaluation metric results
+cv_results <- numeric(length(cv))
+
+# Perform cross-validation
+for (fold in 1:num_folds) {
+  # Split the data into training and testing sets
+  test_indices <- cv[[fold]]
+  train_data <- trim_data[-test_indices, ]
+  test_data <- trim_data[test_indices, ]
+  
+  # Fit the Negative Binomial regression model
+  poisson_model <- glm.nb(lung ~ age + smkcat + sex + smkyrs*sex + offset(log(upyr)),
+                       data=train_data)
+  
+  # Make predictions on the test set
+  predicted_counts <- predict(poisson_model, newdata = test_data, type = "response")
+  
+  # Evaluate the model using an appropriate metric (e.g., RMSE, MAE, AIC)
+  # You can replace "RMSE" with the metric of your choice
+  cv_results[fold] <- mse(predicted_counts, test_data$lung)
+}
+cv_results
+# Calculate the mean and standard deviation of the evaluation metric
+mean_metric <- mean(cv_results)
+std_dev_metric <- sd(cv_results)
+mean_metric
+
+## Error when performing CV for Negative Binomial
+
+
+## Hurdle
+library(pscl)
+set.seed(123)
+h.out1 <- hurdle(lung ~ age + smkcat + sex + smkyrs*sex + log(upyr)|age + smkcat + smkyrs*sex + log(upyr), data= trim_data,dist="poisson",link="logit")
+summary(h.out1)
+AIC(h.out1)
+
+h.out2 <- hurdle(lung ~ age + smkcat + sex + smkyrs*sex + log(upyr)|age + smkcat + smkyrs*sex + log(upyr), data= trim_data,dist="negbin",link="logit")
+summary(h.out2)
+
+AIC(h.out1)
+AIC(h.out2)
+
+
+set.seed(123)
+  # For evaluation metrics
+
+# Set the number of folds for cross-validation
+num_folds <- 5
+
+# Create a 5-fold cross-validation object
+cv <- createFolds(trim_data$lung, k = num_folds, list = TRUE, returnTrain = FALSE)
+
+# Initialize a vector to store evaluation metric results
+cv_results <- numeric(length(cv))
+
+# Perform cross-validation
+for (fold in 1:num_folds) {
+  # Split the data into training and testing sets
+  test_indices <- cv[[fold]]
+  train_data <- trim_data[-test_indices, ]
+  test_data <- trim_data[test_indices, ]
+  
+  # Fit the Hurdle regression model
+  h_model <- hurdle(lung ~ age + smkcat + smkyrs*sex + log(upyr)|age + smkcat + smkyrs*sex + log(upyr), data= train_data,dist="poisson",link="logit")
+  
+  # Make predictions on the test set
+  predicted_counts <- predict(h_model, newdata = test_data, type = "response")
+  
+  # Evaluate the model using an appropriate metric (e.g., RMSE, MAE, AIC)
+  # You can replace "RMSE" with the metric of your choice
+  cv_results[fold] <- mse(predicted_counts, test_data$lung)
+}
+cv_results
+# Calculate the mean and standard deviation of the evaluation metric
+mean_metric <- mean(cv_results)
+std_dev_metric <- sd(cv_results)
+mean_metric
+
+#for nb
+set.seed(123)
+  # For evaluation metrics
+
+# Set the number of folds for cross-validation
+num_folds <- 5
+
+# Create a 5-fold cross-validation object
+cv <- createFolds(trim_data$lung, k = num_folds, list = TRUE, returnTrain = FALSE)
+
+# Initialize a vector to store evaluation metric results
+cv_results <- numeric(length(cv))
+
+# Perform cross-validation
+for (fold in 1:num_folds) {
+  # Split the data into training and testing sets
+  test_indices <- cv[[fold]]
+  train_data <- trim_data[-test_indices, ]
+  test_data <- trim_data[test_indices, ]
+  
+  # Fit the Hurdle regression model
+  h2_model <- hurdle(lung ~ age + smkcat + smkyrs*sex + log(upyr)|age + smkcat + smkyrs*sex + log(upyr), data= train_data,dist="negbin",link="logit")
+  
+  # Make predictions on the test set
+  predicted_counts <- predict(h2_model, newdata = test_data, type = "response")
+  
+  # Evaluate the model using an appropriate metric (e.g., RMSE, MAE, AIC)
+  # You can replace "RMSE" with the metric of your choice
+  cv_results[fold] <- mse(predicted_counts, test_data$lung)
+}
+cv_results
+# Calculate the mean and standard deviation of the evaluation metric
+mean_metric <- mean(cv_results)
+std_dev_metric <- sd(cv_results)
+mean_metric
+
+## Poisson model for hurdle works better
+
+## Observed vs 
+sum(trim_data$lung == 0) # 52262
+sum(trim_data$lung == 1) # 407
+sum(trim_data$lung == 2) # 21
+sum(trim_data$lung == 3) # 3
+sum(trim_data$lung == 4) # 1
+
+p0 = predict(h.out1, type = "prob")[,1] #extract first column
+p1 = predict(h.out1, type = "prob")[,2] #extract first column
+p2 = predict(h.out1, type = "prob")[,3] #extract first column
+p3 = predict(h.out1, type = "prob")[,4] #extract first column
+p4 = predict(h.out1, type = "prob")[,5] #extract first column
+
+round(sum(p0)) #52262
+round(sum(p1)) #410
+round(sum(p2)) #19
+round(sum(p3)) #2
+round(sum(p4)) #0
+
+
+## 
+zinf.out1 <- zeroinfl(lung ~ age + smkcat + sex + smkyrs*sex + log(upyr) |age + smkcat + smkyrs*sex + log(upyr), data=trim_data, dist="poisson",link="logit")
+summary(zinf.out1)
+
+zinf.out2 <- zeroinfl(lung ~ age + smkcat + sex + smkyrs*sex + log(upyr) |age + smkcat + smkyrs*sex + log(upyr), data=trim_data, dist="negbin",link="logit")
+summary(zinf.out2)
+
+c(AIC(zinf.out1),AIC(zinf.out2))
+
+set.seed(123)
+  # For evaluation metrics
+
+# Set the number of folds for cross-validation
+num_folds <- 5
+
+# Create a 5-fold cross-validation object
+cv <- createFolds(trim_data$lung, k = num_folds, list = TRUE, returnTrain = FALSE)
+
+# Initialize a vector to store evaluation metric results
+cv_results <- numeric(length(cv))
+
+# Perform cross-validation
+for (fold in 1:num_folds) {
+  # Split the data into training and testing sets
+  test_indices <- cv[[fold]]
+  train_data <- trim_data[-test_indices, ]
+  test_data <- trim_data[test_indices, ]
+  
+  # Fit the Hurdle regression model
+  zi_model <- zeroinfl(lung ~ age + smkcat + smkyrs*sex + log(upyr) |age + smkcat + smkyrs*sex + log(upyr), data= train_data,dist="poisson",link="logit")
+  
+  # Make predictions on the test set
+  predicted_counts <- predict(zi_model, newdata = test_data, type = "response")
+  
+  # Evaluate the model using an appropriate metric (e.g., RMSE, MAE, AIC)
+  # You can replace "RMSE" with the metric of your choice
+  cv_results[fold] <- mse(predicted_counts, test_data$lung)
+}
+cv_results
+# Calculate the mean and standard deviation of the evaluation metric
+mean_metric <- mean(cv_results)
+std_dev_metric <- sd(cv_results)
+mean_metric
+
+
+set.seed(123)
+  # For evaluation metrics
+
+# Set the number of folds for cross-validation
+num_folds <- 5
+
+# Create a 5-fold cross-validation object
+cv <- createFolds(trim_data$lung, k = num_folds, list = TRUE, returnTrain = FALSE)
+
+# Initialize a vector to store evaluation metric results
+cv_results <- numeric(length(cv))
+
+# Perform cross-validation
+for (fold in 1:num_folds) {
+  # Split the data into training and testing sets
+  test_indices <- cv[[fold]]
+  train_data <- trim_data[-test_indices, ]
+  test_data <- trim_data[test_indices, ]
+  
+  # Fit the Hurdle regression model
+  zi2_model <- zeroinfl(lung ~ age + smkcat + smkyrs*sex + log(upyr) |age + smkcat + smkyrs*sex + log(upyr), data= train_data,dist="negbin",link="logit")
+  
+  # Make predictions on the test set
+  predicted_counts <- predict(zi2_model, newdata = test_data, type = "response")
+  
+  # Evaluate the model using an appropriate metric (e.g., RMSE, MAE, AIC)
+  # You can replace "RMSE" with the metric of your choice
+  cv_results[fold] <- mse(predicted_counts, test_data$lung)
+}
+cv_results
+# Calculate the mean and standard deviation of the evaluation metric
+mean_metric <- mean(cv_results)
+std_dev_metric <- sd(cv_results)
+mean_metric
+
+
+## Poisson model for zero inflated regression works better
+
+## Observed vs 
+sum(trim_data$lung == 0) # 52262
+sum(trim_data$lung == 1) # 407
+sum(trim_data$lung == 2) # 21
+sum(trim_data$lung == 3) # 3
+sum(trim_data$lung == 4) # 1
+
+p0 = predict(zinf.out1, type = "prob")[,1] #extract first column
+p1 = predict(zinf.out1, type = "prob")[,2] #extract first column
+p2 = predict(zinf.out1, type = "prob")[,3] #extract first column
+p3 = predict(zinf.out1, type = "prob")[,4] #extract first column
+p4 = predict(zinf.out1, type = "prob")[,5] #extract first column
+
+round(sum(p0)) #52257
+round(sum(p1)) #416
+round(sum(p2)) #20
+round(sum(p3)) #2
+round(sum(p4)) #0
+
+
+y_est4_direct=predict(zinf.out1,newdata=newdata, type = "response")
+
+```
+
+
+
+### Lasso
+``` {r}
+#Lasso/Ridge regression
+#use of CV (test and train subsets)
+set.seed(123)
+
+glimpse(trim_data)
+trim_data2<-trim_data[,-c(19:20)] #remove larynx and othresp
+RNGkind(sample.kind="Rounding")
+set.seed(2345)
+train <- sample(1:nrow(trim_data2), nrow(trim_data2)/2)
+test <- -train
+trim_data.train <- trim_data2[train,]
+trim_data.test <- trim_data2[test,]
+
+library(genridge)
+library(glmnet)
+train.x <- model.matrix(lung~., data=trim_data.train)[,-1] #minus intercept
+train.y <- trim_data.train$lung
+test.x <- model.matrix(lung~., data=trim_data.test)[,-1]
+test.y <- trim_data.test$lung
+
+lasso.mod <- cv.glmnet(train.x, train.y,family="poisson", alpha=1)
+lambda.lasso <- lasso.mod$lambda.min
+lambda.lasso
+
+#fit best train model with test data
+lasso.pred <- predict(lasso.mod, newx=test.x, s=lambda.lasso,type="response")
+# Lasso test MSE
+mean((test.y-lasso.pred)^2)
+
+#Ridge
+ridge.mod2 <- cv.glmnet(train.x, train.y,family="poisson", alpha=0)
+lambda.ridge <- ridge.mod2$lambda.min
+lambda.ridge
+
+#fit best train model with test data
+ridge.pred <- predict(ridge.mod2, newx=test.x, s=lambda.ridge,type="response")
+# Ridge test MSE
+mean((test.y-ridge.pred)^2)
+
+# use all data to construct the model with LASSO approach
+x <- model.matrix(lung~., data=trim_data2)[,-1]
+y <- trim_data2$lung
+lasso.all <- glmnet(x, y, alpha=1)
+lasso.coef <- predict(lasso.all, type="coefficients", s=lambda.lasso)
+lasso.coef
+lasso.coef[lasso.coef!=0]
+
+
+
+```
+
+
